@@ -24,4 +24,4 @@ i2spayer.pyをRaspberry Pi Pico内蔵フラッシュメモリのルートフォ�
 
 # ライセンス
 i2splayer.pyはMITライセンスで使用できます。
-同梱している音源はOtoLogic(https://otologic.jp)からお借りし手居ます。
+同梱している音源は[OtoLogic](https://otologic.jp)からお借りしています。
