@@ -1,158 +1,144 @@
-from machine import I2S
-from machine import Pin
-import os
-import re
-import time
-import _thread
+from machine import I2S, Pin
+import os, re, sys, time, _thread
 
-## 大域変数の設定
-# 演奏する曲の番号
-songnum = 0
-# 演奏中を示すフラグ
-in_play = False
+# 再生する音声ファイルのサンプリングレート(Hz)
+SRATE = const(8000)
+# 再生する音声ファイルのチャンネル数
+# モノラルの場合はI2S.MONOとする。
+FORMAT = I2S.STEREO
 
-## GPIOの設定
-ledR = Pin(10, Pin.OUT)
-ledG = Pin(11, Pin.OUT)
-ledB = Pin(12, Pin.OUT)
-swA = Pin(13, Pin.IN)
-swB = Pin(14, Pin.IN)
-rotA = Pin(17, Pin.IN)
-rotB = Pin(16, Pin.IN)
-
-## ロータリーエンコーダーの設定
-count = 0
-previous = 0x11
-def irq_encoder(pin):
-    """ ロータリーエンコーダーの操作にしたがって曲番号を増減する。
-    """
-    global previous
-    global count
-    global songnum
-    global in_play
-
-    # 演奏中は無視する。
-    if in_play:
-        return
-    
-    current = rotA.value() + (rotB.value() << 1)
-    if current != previous:
-        state = ((previous << 1) ^ current) & 3
-        count += 1 if state < 2 else -1
-        previous = current
-        if count >= 3:
-            songnum += 1
-            print(songnum)
-            count = 0
-        elif count <= -3:
-            songnum -= 1
-            print(songnum)
-            count = 0
-
-rotA.irq(irq_encoder, trigger=Pin.IRQ_FALLING|Pin.IRQ_RISING)
-rotB.irq(irq_encoder, trigger=Pin.IRQ_FALLING|Pin.IRQ_RISING)
-
-## ボタンの設定
-start_requested = False
-stop_requested = False
-def irq_button(pin):
-    """ 再生、終了ボタンの処理を行う。
-    """
-    global start_requested
-    global stop_requested
-    if pin == Pin(13):
-        start_requested = True
-    elif pin == Pin(14):
-        stop_requested = True
-
-swA.irq(irq_button, trigger=Pin.IRQ_FALLING)
-swB.irq(irq_button, trigger=Pin.IRQ_FALLING)
-
-
-def init_i2s(sck, ws, sd, bits=16, rate=8000, format=I2S.STEREO, buflen=5000):
-    """ I2Sを初期化する。
-    """
-    return I2S(
-        0, # I2S ID
-        sck=sck,
-        ws=ws,
-        sd=sd,
-        mode=I2S.TX,
-        bits=bits,
-        format=format,
-        rate=rate,
-        ibuf=buflen, # buffer長(バイト)
-    )
-
-def player(i2s, files):
-    """ 音楽ファイルを再生する。
-    """
-    global start_requested
-    global stop_requested
-    global songnum
-    global in_play
-
-    buffer = bytearray(1000)
-    buffer_mv = memoryview(buffer)
-    wav = None
-
-    try:
-        print('player start')
-        while True:
-            while not start_requested:
-                time.sleep_ms(100)
-            start_requested = False
-            print(songnum % len(files), files[songnum % len(files)])
-            wav = open(files[songnum % len(files)], "rb")
-            pos = wav.seek(44)
-            in_play = True
-            while not stop_requested:
-                num_read = wav.readinto(buffer_mv)
-                if num_read == 0:
-                    #  曲の最後に達したら先頭に戻る。
-                    wav.seek(44)
-                else:
-                    i2s.write(buffer_mv[:num_read])
-            stop_requested = False
-            wav.close()
-            in_play = False
-    except (KeyboardInterrupt, Exception) as e:
-        print(e)
-        if wav is not None:
-            wav.close()
-        i2s.deinit()
-        return
-    
-def get_wave_files():
-    """ フラッシュメモリ中に格納されているwavファイル一覧を取得する。
-    """
-    return [f for f in os.listdir()
-            if re.search('\.wav$', f) is not None]
-
-def display(arg):
-    """ 再生中にLEDを明滅させる。
-    """
-    global ledR, ledG, ledB
-    global in_play
-
-    def clear():
-        ledR.off()
-        ledG.off()
-        ledB.off()
+# LEDを点滅させる処理を行うクラス
+class Flasher:
+    def __init__(self):
+        # LED用のGPIOを出力モードで初期化
+        self.ledR = Pin(10, Pin.OUT)
+        self.ledG = Pin(11, Pin.OUT)
+        self.ledB = Pin(12, Pin.OUT)
+ 
+    # 点滅を開始する。
+    def start(self):
+        self.req_stop = False
+        # 点滅用のスレッドを作成し、実行を開始する。
+        _thread.start_new_thread(self._flasher, (200,))
         
-    while True:
-        p = 0
-        clear()
-        while in_play:
-            ledR.value(1 if p % 4 == 0 else 0)
-            ledG.value(1 if p % 2 == 1 else 0)
-            ledB.value(1 if p % 4 == 2 else 0)
-            p += 1
-            time.sleep_ms(500)
-        time.sleep_ms(10)
+    # 点滅を終了する。
+    def stop(self):
+        self.req_stop = True
 
-i2s = init_i2s(Pin(18, Pin.OUT),  # sck
-               Pin(19, Pin.OUT),  # ws
-               Pin(20, Pin.OUT))  # sd
-_thread.start_new_thread(display, (None,))
-player(i2s, get_wave_files())
+    # 点滅のメイン処理
+    def _flasher(self, period):
+        t = 0
+        while not self.req_stop:
+            self.ledR.value(1 if t % 4 == 0 else 0)
+            self.ledG.value(1 if t % 2 == 1 else 0)
+            self.ledB.value(1 if t % 4 == 2 else 0)
+            t = (t + 1) % 4
+            time.sleep_ms(period)
+        self.ledR.off()
+        self.ledG.off()
+        self.ledB.off()
+
+# 複数の要素から一つの要素を選択するクラス。
+class Selector:
+    def __init__(self, elements):
+        if elements is None or len(elements) == 0:
+            raise ValueError("1個以上の要素を持つリストを指定してください。")
+        self._elements = elements
+        self.index = 0
+        # ロータリーエンコーダー用のGPIOを入力モードで初期化する。
+        self.rotA = Pin(17, Pin.IN)
+        self.rotB = Pin(16, Pin.IN)
+        # 立ち上がり・立ち下がりエッジで割り込みを発生させる。
+        self.rotA.irq(self._isr, trigger=Pin.IRQ_FALLING|Pin.IRQ_RISING)
+        self.rotB.irq(self._isr, trigger=Pin.IRQ_FALLING|Pin.IRQ_RISING)
+        self.count = 0
+        self.previous = 0x00
+        
+    # ロータリーエンコーダーで発生するGPIO¥割り込みのハンドラ
+    def _isr(self, pin):
+        current = self.rotA.value() + (self.rotB.value() << 1)
+        if current != self.previous:
+            state = ((self.previous >> 1) ^ current) & 3
+            self.count += 1 if state % 2 == 1 else -1
+            self.previous = current
+            if self.count == 4 or self.count == -4:
+                direction = self.count // 4
+                self.index = (self.index + direction) % len(self._elements)
+                print(self.index, self._elements[self.index])
+                self.count = 0
+
+    # 現在選択されている要素を返す。
+    def get_current(self):
+        return self.index, self._elements[self.index]
+
+# 音声ファイルを再生するクラス
+class Player:
+    def __init__(self):
+        # I2Sモジュールを初期化する。
+        self.i2s = I2S(
+            0,
+            sck=Pin(18, Pin.OUT), ws=Pin(19, Pin.OUT), sd=Pin(20, Pin.OUT),
+            mode=I2S.TX, bits=16, format=FORMAT, rate=SRATE, ibuf=5000)
+        self.flasher = Flasher()
+        # フラッシュメモリ中で拡張子が.wavのファイルを抽出する。
+        self.file_list = [file for file in os.listdir()
+                          if re.search('\.wav$', file) is not None]
+        self.selector = Selector(self.file_list)
+        self.start_requested = False
+        self.stop_requested = False
+
+        # ボタンの割り込み設定
+        self.swA = Pin(13, Pin.IN)
+        self.swB = Pin(14, Pin.IN)
+        self.swA.irq(self._start_isr, trigger=Pin.IRQ_FALLING)
+        self.swB.irq(None)
+
+    def main_loop(self):
+        # I2S再生データを格納するバッファメモリを確保する。
+        buffer = bytearray(1000)
+        buffer_mv = memoryview(buffer)
+        try:
+            print('player start')
+            while True:
+                # 開始ボタンが押されたかを10ミリ秒ごとに監視する。
+                while not self.start_requested:
+                    time.sleep_ms(10)
+                self.start_requested = False
+                index, file_name = self.selector.get_current()
+                with open(file_name, "rb") as f:
+                    # wavファイルのヘッダ部(44バイト)を読み飛ばす。
+                    f.seek(44)
+                    # 終了ボタンが押されるまで再生を繰り返す。
+                    while not self.stop_requested:
+                        num_read = f.readinto(buffer_mv)
+                        if num_read == 0:
+                            #  曲の最後に達したら先頭に戻る。
+                            f.seek(44)
+                        else:
+                            # 確保したバッファメモリ分のデータをI2Sモジュールに送信する。
+                            self.i2s.write(buffer_mv[:num_read])
+                    self.stop_requested = False
+        except (KeyboardInterrupt, Exception):
+            # キーボード割り込み(Ctrl-C)または例外が発生したら終了する。
+            self.i2s.deinit()
+
+    # 開始ボタンが押されたときの割り込みハンドラ
+    def _start_isr(self, arg):
+        self.swA.irq(None)
+        self.start_requested = True
+        self.swB.irq(self._stop_isr, trigger=Pin.IRQ_FALLING)
+        self.flasher.start()
+
+    # 終了ボタンが押されたときの割り込みハンドラ
+    def _stop_isr(self, arg):
+        self.swB.irq(None)
+        self.stop_requested = True
+        self.swA.irq(self._start_isr, trigger=Pin.IRQ_FALLING)
+        self.flasher.stop()
+
+# 実行スクリプトとして読み出されたときはプレイヤーを開始する。
+if __name__ == '__main__':
+    Player().main_loop()
+    # 実行中のスレッドがあれば実行終了させてプレイヤーを終了させる。
+    sys.exit()
+    
